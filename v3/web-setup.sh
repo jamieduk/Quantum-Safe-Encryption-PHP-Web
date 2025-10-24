@@ -4,19 +4,21 @@
 # sudo ./web-setup.sh
 #
 # ----------------------------------------------------------------------
-# Hybrid Crypto File Encryption/Decryption Web App Setup Script
+# Q-Safe File Encryption/Decryption Web App Setup Script
+# https://github.com/jamieduk/Quantum-Safe-Encryption-PHP-Web
 # ----------------------------------------------------------------------
-# This script sets up a multi-factor hybrid cryptography system (RSA-4096 / AES-256-GCM).
-# It generates the required RSA key pair and writes the index.php and download.php files.
-# The core logic implements a three-factor security scheme:
-# 1. Server's Private Key (Asymmetric Protection)
-# 2. User Password (PBKDF2 Derived Key Protection)
-# 3. Key Protector File (Symmetric Key Metadata)
+# This script sets up a multi-factor hybrid cryptography system.
+# The Symmetric Key (SKEY) is protected by TWO layers:
+# 1. Server's Public Key (Asymmetric RSA-4096)
+# 2. User's Password (Symmetric AES-256 via PBKDF2/Argon2)
+#
+# Decryption requires: Private Key (Server) + Key Protector File (User) + Password (User)
+#
+# *** UPDATE: Now preserves original filename/extension in the Key Protector (.json) ***
 # ----------------------------------------------------------------------
-set -e
 
 # --- Configuration ---
-WEB_ROOT="/var/www/html/apps/quantum-safe-cypher" # Set web root path
+WEB_ROOT="/var/www/html/apps/quantum-safe-cypher" # UPDATED PATH
 DATA_DIR="$WEB_ROOT/data"
 LOGS_DIR="$WEB_ROOT/logs"
 KEYS_DIR="$WEB_ROOT/keys"
@@ -24,22 +26,19 @@ PHP_FILE="$WEB_ROOT/index.php"
 DOWNLOAD_FILE="$WEB_ROOT/download.php"
 PRIVATE_KEY_FILE="$KEYS_DIR/private_server_key.pem"
 PUBLIC_KEY_FILE="$KEYS_DIR/public_server_key.pem"
-# --- UPDATED: PQC Key Defaults ---
-new_style_pub_key="$KEYS_DIR/pqc_public_key.bin" # New Kyber Public Key
-new_style_private_key="$KEYS_DIR/pqc_private_key.bin" # New Kyber Private Key
+
 # --- Functions ---
 
 # Function to check if a command exists
 check_dependency() {
-    if ! command -v "$1" &> /dev/null
-    then
+    if ! command -v "$1" &> /dev/null; then
         echo "Error: Required dependency '$1' not found."
-        echo "Please install it. Example: sudo apt install -y $1"
+        echo "Please install it. Example: sudo apt install $1"
         exit 1
     fi
 }
 
-# Function to generate the PHP application file (index.php)
+# Function to generate the PHP application file
 generate_php_app() {
     cat << 'PHP_APP_EOF' > "$PHP_FILE"
 <?php
@@ -52,49 +51,19 @@ $DATA_DIR = __DIR__ . '/data';
 $LOGS_DIR = __DIR__ . '/logs';
 $KEYS_DIR = __DIR__ . '/keys';
 
-// --- Key Paths (MUST match paths in the key generation scripts) ---
-
-// Legacy RSA Key Paths
-const RSA_PRIVATE_KEY_PATH = __DIR__ . '/keys/private_server_key.pem';
-const RSA_PUBLIC_KEY_PATH = __DIR__ . '/keys/public_server_key.pem';
-
-// Quantum-Safe Kyber Key Paths (Generated as raw binary .bin files)
-const PQC_PRIVATE_KEY_PATH = __DIR__ . '/keys/pqc_private_key.bin';
-const PQC_PUBLIC_KEY_PATH = __DIR__ . '/keys/pqc_public_key.bin';
+// Key Paths (MUST match paths in the setup script)
+const PRIVATE_KEY_PATH = __DIR__ . '/keys/private_server_key.pem';
+const PUBLIC_KEY_PATH = __DIR__ . '/keys/public_server_key.pem';
 
 $UPLOAD_MAX_SIZE = 10 * 1024 * 1024; // 10MB limit
 
-/**
- * Determines the active key mode (PQC or RSA) based on file existence.
- * PQC is prioritized for quantum-safe fallback logic.
- * @return string 'PQC', 'RSA', or '' (no keys found).
- */
-function get_active_key_mode(): string {
-    if (file_exists(PQC_PRIVATE_KEY_PATH) && file_exists(PQC_PUBLIC_KEY_PATH)) {
-        return 'PQC';
-    }
-    if (file_exists(RSA_PRIVATE_KEY_PATH) && file_exists(RSA_PUBLIC_KEY_PATH)) {
-        return 'RSA';
-    }
-    return ''; // Indicate no keys found
-}
-
-// --- Setup Checks and Dynamic Path Assignment ---
-$keyMode = get_active_key_mode();
-
+// --- Setup Checks ---
 if (!is_dir($DATA_DIR)) { mkdir($DATA_DIR, 0700, true); }
 if (!is_dir($LOGS_DIR)) { mkdir($LOGS_DIR, 0700, true); }
 if (!is_dir($KEYS_DIR)) { die("Error: Keys directory not found. Run setup script."); }
-
-if ($keyMode === '') {
-    die("Error: No key pair (PQC or RSA) found. Run the key generation script.");
+if (!file_exists(PRIVATE_KEY_PATH) || !file_exists(PUBLIC_KEY_PATH)) {
+    die("Error: Key pair not found. Run the setup script to generate keys.");
 }
-
-// Dynamically set key paths and algorithm name based on detected mode
-$ACTIVE_PUBLIC_KEY_PATH = ($keyMode === 'PQC') ? PQC_PUBLIC_KEY_PATH : RSA_PUBLIC_KEY_PATH;
-$ACTIVE_PRIVATE_KEY_PATH = ($keyMode === 'PQC') ? PQC_PRIVATE_KEY_PATH : RSA_PRIVATE_KEY_PATH;
-$ACTIVE_ALG_NAME = ($keyMode === 'PQC') ? 'Kyber-KEM (fallback to RSA operation)' : 'RSA-4096';
-
 
 /**
  * Derives a strong, fixed-size symmetric key from a password and salt.
@@ -104,7 +73,6 @@ $ACTIVE_ALG_NAME = ($keyMode === 'PQC') ? 'Kyber-KEM (fallback to RSA operation)
  */
 function derive_key(string $password, string $salt): string {
     // Rely exclusively on PBKDF2 for deterministic key derivation (100,000 iterations).
-    // This derived key (PDK) is used to protect the Key Protector file (Layer 4).
     return hash_pbkdf2('sha256', $password, $salt, 100000, 32, true);
 }
 
@@ -117,12 +85,12 @@ function derive_key(string $password, string $salt): string {
  * @return array|false Returns [encryptedFile, keyFile] on success.
  */
 function encrypt_file(string $filePath, string $password, string $originalUploadName): array|false {
-    global $DATA_DIR, $LOGS_DIR, $keyMode, $ACTIVE_PUBLIC_KEY_PATH;
+    global $DATA_DIR, $LOGS_DIR;
     try {
         $fileData = file_get_contents($filePath);
         if ($fileData === false) { throw new Exception("Could not read file contents."); }
 
-        // --- Layer 1: File Encryption (Symmetric - AES-256-GCM) ---
+        // --- Layer 1: File Encryption (Symmetric) ---
         $skey = openssl_random_pseudo_bytes(32); // Random 256-bit AES key
         $iv = openssl_random_pseudo_bytes(openssl_cipher_iv_length('aes-256-gcm'));
         $tag = '';
@@ -131,22 +99,19 @@ function encrypt_file(string $filePath, string $password, string $originalUpload
         if ($encryptedData === false) { throw new Exception("File encryption failed."); }
 
         // --- Layer 2: SKEY Protection (Asymmetric - Server's Public Key) ---
-        $publicKey = file_get_contents($ACTIVE_PUBLIC_KEY_PATH); // *** DYNAMIC KEY PATH ***
+        $publicKey = file_get_contents(PUBLIC_KEY_PATH);
         if ($publicKey === false) { throw new Exception("Could not read public key."); }
 
         $encryptedSKey_PK = '';
-        
-        // Kyber KEM requires a special PHP extension (e.g., oqs-php). 
-        // The operation uses OpenSSL's internal `openssl_public_encrypt` (RSA-like).
         if (!openssl_public_encrypt($skey, $encryptedSKey_PK, $publicKey, OPENSSL_PKCS1_OAEP_PADDING)) {
-            throw new Exception("Symmetric key public encryption failed (using $keyMode key path).");
+            throw new Exception("Symmetric key public encryption failed.");
         }
-        
+
         // --- Layer 3: Key Protector Generation (Data containing the Public-Key encrypted SKEY) ---
         $keyProtectorJSON = json_encode([
-            'version' => 4, // New version to reflect key mode
-            'alg' => 'AES-256-GCM-' . $keyMode, // *** DYNAMIC ALGORITHM NAME FOR DECRYPTION ***
-            'originalFilename' => $originalUploadName,
+            'version' => 3, // Increment version for new feature (filename storage)
+            'alg' => 'AES-256-GCM-RSA-4096-PDK',
+            'originalFilename' => $originalUploadName, // *** NEW: Store original filename ***
             'encryptedSKey_PK' => base64_encode($encryptedSKey_PK), // SKEY wrapped by Public Key
             'fileIV' => base64_encode($iv),
             'fileTag' => base64_encode($tag),
@@ -226,40 +191,26 @@ function decrypt_file(string $filePath, string $keyFilePath, string $password): 
         // Decrypt the internal Key Protector JSON
         $keyProtectorJSON = openssl_decrypt($encryptedKeyProtector_PDK, 'aes-256-gcm', $pdk, OPENSSL_RAW_DATA, $kpIv, $kpTag);
         if ($keyProtectorJSON === false) {
-            // This is the CRITICAL failure point for an incorrect password
             throw new Exception("Key Protector decryption failed. (Incorrect Password or Corrupt Key Protector File)");
         }
         
         $kp = json_decode($keyProtectorJSON, true);
-        // Check for required fields and the algorithm field
-        if (!$kp || !isset($kp['encryptedSKey_PK'], $kp['fileIV'], $kp['fileTag'], $kp['originalFilename'], $kp['alg'])) {
-            throw new Exception("Invalid decrypted Key Protector data (missing required fields or algorithm).");
+        // *** NEW: Check for originalFilename ***
+        if (!$kp || !isset($kp['encryptedSKey_PK'], $kp['fileIV'], $kp['fileTag'], $kp['originalFilename'])) {
+            throw new Exception("Invalid decrypted Key Protector data (missing required fields).");
         }
-        $originalFilename = $kp['originalFilename'];
-        $encryptedKeyAlg = $kp['alg'];
-
-        // --- Determine Key Path Based on Stored Algorithm ---
-        // This allows decryption of files encrypted with either RSA or PQC (Kyber) keys
-        if (strpos($encryptedKeyAlg, 'PQC') !== false) {
-            $privateKeyPath = PQC_PRIVATE_KEY_PATH;
-        } else {
-            $privateKeyPath = RSA_PRIVATE_KEY_PATH;
-        }
+        $originalFilename = $kp['originalFilename']; // *** RETRIEVE ORIGINAL FILENAME ***
 
 
         // --- Layer 2 Decryption: SKEY Unwrapper (Server's Private Key) ---
         $encryptedSKey_PK = base64_decode($kp['encryptedSKey_PK']);
-        $privateKey = file_get_contents($privateKeyPath); // *** DYNAMIC KEY PATH ***
+        $privateKey = file_get_contents(PRIVATE_KEY_PATH);
         if ($privateKey === false) { throw new Exception("Could not read private key (Server error)."); }
 
         $skey = '';
-        
-        // Decrypt the symmetric key using the appropriate private key and OpenSSL's RSA-like function
         if (!openssl_private_decrypt($encryptedSKey_PK, $skey, $privateKey, OPENSSL_PKCS1_OAEP_PADDING)) {
-            // This is the CRITICAL failure point if the server's private key is wrong or data is corrupt
-            throw new Exception("Symmetric Key private decryption failed (Corrupt data, incorrect server key, or wrong $encryptedKeyAlg key).");
+            throw new Exception("Symmetric Key private decryption failed (Corrupt data or incorrect key).");
         }
-        
         if (strlen($skey) !== 32) { throw new Exception("Symmetric Key has incorrect size after decryption."); }
 
 
@@ -272,7 +223,6 @@ function decrypt_file(string $filePath, string $keyFilePath, string $password): 
 
         $decryptedData = openssl_decrypt($encryptedData, 'aes-256-gcm', $skey, OPENSSL_RAW_DATA, $fileIV, $fileTag);
         if ($decryptedData === false) {
-            // This is the CRITICAL failure point if the file's integrity check fails
             throw new Exception("File decryption failed (Integrity Check Failed or Corrupt Data).");
         }
 
@@ -301,8 +251,6 @@ function decrypt_file(string $filePath, string $keyFilePath, string $password): 
 }
 
 // --- Request Handling ---
-global $keyMode, $ACTIVE_ALG_NAME; // Import global variables
-
 $message = '';
 $downloadFile = null;
 
@@ -311,11 +259,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $password = $_POST['password'] ?? '';
     $passwordConfirm = $_POST['password_confirm'] ?? '';
 
-    // General input validation
     if (empty($password)) {
         $message = '<div class="alert error">Password cannot be empty.</div>';
-    } elseif (strlen($password) < 8) {
-         $message = '<div class="alert error">Password must be at least 8 characters long.</div>';
     } elseif ($password !== $passwordConfirm) {
         $message = '<div class="alert error">Passwords do not match.</div>';
     } else {
@@ -323,7 +268,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($_FILES['uploaded_file']['size'] > $UPLOAD_MAX_SIZE) {
                 $message = '<div class="alert error">File size exceeds the 10MB limit.</div>';
             } else {
-                // *** Pass original filename to the encrypt function ***
+                // *** NEW: Pass original filename to the encrypt function ***
                 $originalUploadName = $_FILES['uploaded_file']['name']; 
                 $result = encrypt_file($_FILES['uploaded_file']['tmp_name'], $password, $originalUploadName);
                 if ($result) {
@@ -364,7 +309,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         .alert { padding: 12px; margin-bottom: 20px; border-radius: 8px; font-weight: 600; }
         .success { background-color: #d1fae5; color: #065f46; border: 1px solid #a7f3d0; }
         .error { background-color: #fee2e2; color: #991b1b; border: 1px solid #fecaca; }
-        .warning { background-color: #fffbeb; color: #b45309; border: 1px solid #fcd34d; }
         input[type="file"] { border: 1px solid #d1d5db; padding: 8px; border-radius: 6px; }
     </style>
 </head>
@@ -372,20 +316,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     <div class="container bg-white shadow-xl rounded-xl p-8">
         <h1 class="text-3xl font-bold mb-2 text-gray-800">Multi-Factor File Cryptography</h1>
-
-        <div class="alert warning">
-            <p class="font-bold">Active Key Mode: <?php echo $ACTIVE_ALG_NAME; ?></p>
-            <p class="text-sm">
-                The application successfully detected the **<?php echo $keyMode; ?>** key path. 
-                However, for the actual key wrapping operation, standard PHP currently relies on 
-                <span class="font-semibold">OpenSSL's RSA-like function</span> because native Kyber KEM 
-                functions (needed for true PQC) are not built into standard PHP. True quantum-safe cryptography requires 
-                the **`oqs-php` extension** to be installed alongside PQC keys.
-            </p>
-        </div>
         <p class="text-sm text-gray-500 mb-6">
             Uses a three-factor scheme: Server Private Key + User Password + Key Protector File.
-            The **User Password** protection ensures file security even if the server's Private Key is compromised.
+            The server's private key is required for decryption, making this operation server-bound.
         </p>
 
         <?php echo $message; ?>
@@ -483,7 +416,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     <?php endif; ?>
                 </div>
                 <p class="mt-4 text-sm text-red-600 font-semibold">
-                    !!! IMPORTANT: Both the **Password** AND the **Key Protector file** are mandatory for decryption.
+                    !!! IMPORTANT: Both the Password AND the Key Protector file are mandatory for decryption.
                 </p>
             </div>
         <?php endif; ?>
@@ -509,7 +442,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 PHP_APP_EOF
 }
 
-# Function to generate the PHP download handler (download.php)
+# Function to generate the PHP download handler (No changes needed here)
 generate_download_handler() {
     cat << 'DOWNLOAD_HANDLER_EOF' > "$DOWNLOAD_FILE"
 <?php
@@ -535,7 +468,7 @@ if (!$filepath || !file_exists($filepath) || strpos($filepath, $DATA_DIR) !== 0)
 // Set headers for download
 header('Content-Description: File Transfer');
 header('Content-Type: application/octet-stream');
-// The $filename variable now contains the correct filename (either encrypted/key or decrypted/original)
+// The $filename variable now contains the original filename if it was successfully decrypted
 header('Content-Disposition: attachment; filename="' . $filename . '"');
 header('Expires: 0');
 header('Cache-Control: must-revalidate');
@@ -553,7 +486,7 @@ DOWNLOAD_HANDLER_EOF
 
 # --- Script Execution ---
 
-echo "Starting Hybrid Crypto Web App Setup..."
+echo "Starting Quantum-Safe Hybrid Crypto Web App Setup..."
 
 # 1. Dependency Checks
 echo "Checking dependencies: php, openssl..."
@@ -570,52 +503,30 @@ mkdir -p "$DATA_DIR"
 mkdir -p "$LOGS_DIR"
 mkdir -p "$KEYS_DIR" # New directory for keys
 
-# 4. Key Pair Generation (Hybrid RSA/PQC)
-echo "--- Key Pair Generation Status ---"
-
-# 4a. RSA 4096-bit (Standard Backup)
+# 4. Key Pair Generation (RSA 4096-bit)
 if [ ! -f "$PRIVATE_KEY_FILE" ]; then
-    echo "Generating RSA 4096-bit private/public key pair (Fallback Key)..."
+    echo "Generating RSA 4096-bit private/public key pair..."
+    # Generate the private key
     openssl genpkey -algorithm RSA -out "$PRIVATE_KEY_FILE" -pkeyopt rsa_keygen_bits:4096 2>/dev/null
+
+    # Extract the public key from the private key
     openssl rsa -pubout -in "$PRIVATE_KEY_FILE" -out "$PUBLIC_KEY_FILE" 2>/dev/null
-    if [ $? -ne 0 ]; then
-        echo "Error generating RSA keys. Aborting."
+
+    if [ $? -eq 0 ]; then
+        echo "Keys generated successfully."
+    else
+        echo "Error generating keys. Aborting."
         exit 1
     fi
-    echo "RSA Keys generated successfully."
 else
-    echo "RSA Key pair already exists. Skipping RSA generation."
+    echo "RSA Key pair already exists. Skipping generation."
 fi
-
-# 4b. PQC Kyber Keys (Requires OQS-enabled OpenSSL)
-if [ ! -f "$new_style_private_key" ]; then
-    echo ""
-    echo "Kyber PQC key pair missing. Kyber mode is currently disabled."
-    echo "----------------------------------------------------------------------"
-    echo "TO ENABLE QUANTUM-SAFE MODE (PQC):"
-    echo "1. Install OpenSSL compiled with the Open Quantum Safe (OQS) provider."
-    echo "2. Run the following commands to generate the raw binary keys required by the app:"
-    echo '   # Generate PEM key (e.g., Kyber768 or Kyber1024):'
-    echo '   openssl genpkey -algorithm Kyber768 -out KyberKey.pem'
-    echo "   # Convert to raw binary format (.bin) required by PHP:"
-    echo "   openssl pkey -in KyberKey.pem -outform DER -out $new_style_private_key"
-    echo "   openssl pkey -in KyberKey.pem -pubout -outform DER -out $new_style_pub_key"
-    echo "The application will automatically prioritize Kyber keys once they are available in $KEYS_DIR."
-    echo "----------------------------------------------------------------------"
-else
-    echo "Kyber PQC key pair detected. PQC mode will be prioritized."
-fi
-
 
 # 5. Set Permissions (CRITICAL for security)
 echo "Setting secure file permissions for the new path: $WEB_ROOT"
 
 # Ownership: Everything should belong to the web user (www-data)
-if id -u "$WEB_USER" >/dev/null 2>&1; then
-    sudo chown -R $WEB_USER:$WEB_USER "$WEB_ROOT"
-else
-    echo "Warning: '$WEB_USER' user not found. Skipping ownership change."
-fi
+sudo chown -R $WEB_USER:$WEB_USER "$WEB_ROOT"
 
 # Permissions on Directories
 sudo chmod 755 "$WEB_ROOT"
@@ -623,17 +534,15 @@ sudo chmod 700 "$DATA_DIR" # Data directory only accessible by owner (www-data)
 sudo chmod 700 "$LOGS_DIR" # Logs directory only accessible by owner (www-data)
 sudo chmod 700 "$KEYS_DIR" # Keys directory only accessible by owner (www-data)
 
-# Permissions on Key Files (Covers RSA and PQC)
-echo "Setting restrictive permissions on all keys in $KEYS_DIR"
-# Private Keys (RSA and PQC): Read-only for owner (www-data), NO access for group or others (600)
+# Permissions on Key Files
+echo "Setting restrictive permissions on the private key ($PRIVATE_KEY_FILE)"
+# Private Key: Read-only for owner (www-data), NO access for group or others (600)
 sudo chmod 600 "$PRIVATE_KEY_FILE"
-sudo chmod 600 "$new_style_private_key" 2>/dev/null || true # Suppress error if file doesn't exist
-# Public Keys (RSA and PQC): Read-only for owner (www-data), Read-only for group/others (644)
+# Public Key: Read-only for owner (www-data), Read-only for group/others (644)
 sudo chmod 644 "$PUBLIC_KEY_FILE"
-sudo chmod 644 "$new_style_pub_key" 2>/dev/null || true # Suppress error if file doesn't exist
 
 # 6. Generate PHP Files
-echo "Generating index.php (Web App) with PQC fallback logic..."
+echo "Generating index.php (Web App) with filename preservation logic..."
 generate_php_app
 
 echo "Generating download.php (Secure Downloader)..."
@@ -642,7 +551,11 @@ generate_download_handler
 
 echo "----------------------------------------------------------------------"
 echo "Setup Complete!"
-echo "The application is ready to use with RSA fallback, awaiting PQC keys."
+echo "The application is ready to use."
+echo "CRITICAL SECURITY NOTE:"
+echo "The Private Key is located at: $PRIVATE_KEY_FILE"
+echo "It is owned by '$WEB_USER' and set to '600' (owner read/write only)."
+echo "Do not modify these permissions unless you know exactly what you are doing."
 echo "----------------------------------------------------------------------"
 echo ""
 
