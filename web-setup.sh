@@ -5,6 +5,7 @@
 #
 # ----------------------------------------------------------------------
 # Hybrid Crypto File Encryption/Decryption Web App Setup Script
+# https://github.com/jamieduk/Quantum-Safe-Encryption-PHP-Web
 # ----------------------------------------------------------------------
 # This script sets up a multi-factor hybrid cryptography system (RSA-4096 / AES-256-GCM).
 # It generates the required RSA key pair and writes the index.php and download.php files.
@@ -48,21 +49,21 @@ ini_set('display_errors', 1);
 error_reporting(E_ALL);
 
 // Configuration
-$DATA_DIR = __DIR__ . '/data';
-$LOGS_DIR = __DIR__ . '/logs';
-$KEYS_DIR = __DIR__ . '/keys';
+$DATA_DIR=__DIR__ . '/data';
+$LOGS_DIR=__DIR__ . '/logs';
+$KEYS_DIR=__DIR__ . '/keys';
 
 // --- Key Paths (MUST match paths in the key generation scripts) ---
 
 // Legacy RSA Key Paths
-const RSA_PRIVATE_KEY_PATH = __DIR__ . '/keys/private_server_key.pem';
-const RSA_PUBLIC_KEY_PATH = __DIR__ . '/keys/public_server_key.pem';
+const RSA_PRIVATE_KEY_PATH=__DIR__ . '/keys/private_server_key.pem';
+const RSA_PUBLIC_KEY_PATH=__DIR__ . '/keys/public_server_key.pem';
 
 // Quantum-Safe Kyber Key Paths (Generated as raw binary .bin files)
-const PQC_PRIVATE_KEY_PATH = __DIR__ . '/keys/pqc_private_key.bin';
-const PQC_PUBLIC_KEY_PATH = __DIR__ . '/keys/pqc_public_key.bin';
+const PQC_PRIVATE_KEY_PATH=__DIR__ . '/keys/pqc_private_key.bin';
+const PQC_PUBLIC_KEY_PATH=__DIR__ . '/keys/pqc_public_key.bin';
 
-$UPLOAD_MAX_SIZE = 10 * 1024 * 1024; // 10MB limit
+$UPLOAD_MAX_SIZE=10 * 1024 * 1024; // 10MB limit
 
 /**
  * Determines the active key mode (PQC or RSA) based on file existence.
@@ -80,7 +81,7 @@ function get_active_key_mode(): string {
 }
 
 // --- Setup Checks and Dynamic Path Assignment ---
-$keyMode = get_active_key_mode();
+$keyMode=get_active_key_mode();
 
 if (!is_dir($DATA_DIR)) { mkdir($DATA_DIR, 0700, true); }
 if (!is_dir($LOGS_DIR)) { mkdir($LOGS_DIR, 0700, true); }
@@ -91,9 +92,9 @@ if ($keyMode === '') {
 }
 
 // Dynamically set key paths and algorithm name based on detected mode
-$ACTIVE_PUBLIC_KEY_PATH = ($keyMode === 'PQC') ? PQC_PUBLIC_KEY_PATH : RSA_PUBLIC_KEY_PATH;
-$ACTIVE_PRIVATE_KEY_PATH = ($keyMode === 'PQC') ? PQC_PRIVATE_KEY_PATH : RSA_PRIVATE_KEY_PATH;
-$ACTIVE_ALG_NAME = ($keyMode === 'PQC') ? 'Kyber-KEM (fallback to RSA operation)' : 'RSA-4096';
+$ACTIVE_PUBLIC_KEY_PATH=($keyMode === 'PQC') ? PQC_PUBLIC_KEY_PATH : RSA_PUBLIC_KEY_PATH;
+$ACTIVE_PRIVATE_KEY_PATH=($keyMode === 'PQC') ? PQC_PRIVATE_KEY_PATH : RSA_PRIVATE_KEY_PATH;
+$ACTIVE_ALG_NAME=($keyMode === 'PQC') ? 'Kyber-KEM (fallback to RSA operation)' : 'RSA-4096';
 
 
 /**
@@ -119,22 +120,22 @@ function derive_key(string $password, string $salt): string {
 function encrypt_file(string $filePath, string $password, string $originalUploadName): array|false {
     global $DATA_DIR, $LOGS_DIR, $keyMode, $ACTIVE_PUBLIC_KEY_PATH;
     try {
-        $fileData = file_get_contents($filePath);
+        $fileData=file_get_contents($filePath);
         if ($fileData === false) { throw new Exception("Could not read file contents."); }
 
         // --- Layer 1: File Encryption (Symmetric - AES-256-GCM) ---
-        $skey = openssl_random_pseudo_bytes(32); // Random 256-bit AES key
-        $iv = openssl_random_pseudo_bytes(openssl_cipher_iv_length('aes-256-gcm'));
-        $tag = '';
+        $skey=openssl_random_pseudo_bytes(32); // Random 256-bit AES key
+        $iv=openssl_random_pseudo_bytes(openssl_cipher_iv_length('aes-256-gcm'));
+        $tag='';
 
-        $encryptedData = openssl_encrypt($fileData, 'aes-256-gcm', $skey, OPENSSL_RAW_DATA, $iv, $tag);
+        $encryptedData=openssl_encrypt($fileData, 'aes-256-gcm', $skey, OPENSSL_RAW_DATA, $iv, $tag);
         if ($encryptedData === false) { throw new Exception("File encryption failed."); }
 
         // --- Layer 2: SKEY Protection (Asymmetric - Server's Public Key) ---
-        $publicKey = file_get_contents($ACTIVE_PUBLIC_KEY_PATH); // *** DYNAMIC KEY PATH ***
+        $publicKey=file_get_contents($ACTIVE_PUBLIC_KEY_PATH); // *** DYNAMIC KEY PATH ***
         if ($publicKey === false) { throw new Exception("Could not read public key."); }
 
-        $encryptedSKey_PK = '';
+        $encryptedSKey_PK='';
         
         // Kyber KEM requires a special PHP extension (e.g., oqs-php). 
         // The operation uses OpenSSL's internal `openssl_public_encrypt` (RSA-like).
@@ -143,7 +144,7 @@ function encrypt_file(string $filePath, string $password, string $originalUpload
         }
         
         // --- Layer 3: Key Protector Generation (Data containing the Public-Key encrypted SKEY) ---
-        $keyProtectorJSON = json_encode([
+        $keyProtectorJSON=json_encode([
             'version' => 4, // New version to reflect key mode
             'alg' => 'AES-256-GCM-' . $keyMode, // *** DYNAMIC ALGORITHM NAME FOR DECRYPTION ***
             'originalFilename' => $originalUploadName,
@@ -154,17 +155,17 @@ function encrypt_file(string $filePath, string $password, string $originalUpload
         if ($keyProtectorJSON === false) { throw new Exception("Key Protector JSON encoding failed."); }
 
         // --- Layer 4: Key Protector Protection (Symmetric - User Password) ---
-        $salt = openssl_random_pseudo_bytes(16); // Salt for PDK derivation
-        $pdk = derive_key($password, $salt); // Password Derived Key
+        $salt=openssl_random_pseudo_bytes(16); // Salt for PDK derivation
+        $pdk=derive_key($password, $salt); // Password Derived Key
 
-        $kpIv = openssl_random_pseudo_bytes(openssl_cipher_iv_length('aes-256-gcm'));
-        $kpTag = '';
+        $kpIv=openssl_random_pseudo_bytes(openssl_cipher_iv_length('aes-256-gcm'));
+        $kpTag='';
 
-        $encryptedKeyProtector_PDK = openssl_encrypt($keyProtectorJSON, 'aes-256-gcm', $pdk, OPENSSL_RAW_DATA, $kpIv, $kpTag);
+        $encryptedKeyProtector_PDK=openssl_encrypt($keyProtectorJSON, 'aes-256-gcm', $pdk, OPENSSL_RAW_DATA, $kpIv, $kpTag);
         if ($encryptedKeyProtector_PDK === false) { throw new Exception("Key Protector encryption failed."); }
 
         // Final Key File Structure (Password/PDK factors)
-        $finalKeyFile = json_encode([
+        $finalKeyFile=json_encode([
             'salt' => base64_encode($salt),
             'kpIv' => base64_encode($kpIv),
             'kpTag' => base64_encode($kpTag),
@@ -172,11 +173,11 @@ function encrypt_file(string $filePath, string $password, string $originalUpload
         ]);
 
         // 5. Save Encrypted File and Key Protector
-        $originalFilenameBase = pathinfo($originalUploadName, PATHINFO_FILENAME);
-        $timestamp = time();
+        $originalFilenameBase=pathinfo($originalUploadName, PATHINFO_FILENAME);
+        $timestamp=time();
 
-        $outputFile = $originalFilenameBase . "_encrypted_" . $timestamp . ".enc";
-        $keyFile = $originalFilenameBase . "_key_protector_" . $timestamp . ".json";
+        $outputFile=$originalFilenameBase . "_encrypted_" . $timestamp . ".enc";
+        $keyFile=$originalFilenameBase . "_key_protector_" . $timestamp . ".json";
 
         if (!file_put_contents("$DATA_DIR/$outputFile", $encryptedData) ||
             !file_put_contents("$DATA_DIR/$keyFile", $finalKeyFile)
@@ -207,52 +208,52 @@ function decrypt_file(string $filePath, string $keyFilePath, string $password): 
     global $DATA_DIR, $LOGS_DIR;
     try {
         // --- Layer 4 Decryption: Key Protector Unwrapper (User Password) ---
-        $finalKeyFile = file_get_contents($keyFilePath);
+        $finalKeyFile=file_get_contents($keyFilePath);
         if ($finalKeyFile === false) { throw new Exception("Could not read Key Protector file."); }
-        $kpFinal = json_decode($finalKeyFile, true);
+        $kpFinal=json_decode($finalKeyFile, true);
         if (!$kpFinal || !isset($kpFinal['salt'], $kpFinal['kpIv'], $kpFinal['kpTag'], $kpFinal['payload'])) {
             throw new Exception("Invalid Key Protector file format.");
         }
 
         // Decode Base64 data for PDK unwrapping
-        $salt = base64_decode($kpFinal['salt']);
-        $kpIv = base64_decode($kpFinal['kpIv']);
-        $kpTag = base64_decode($kpFinal['kpTag']);
-        $encryptedKeyProtector_PDK = base64_decode($kpFinal['payload']);
+        $salt=base64_decode($kpFinal['salt']);
+        $kpIv=base64_decode($kpFinal['kpIv']);
+        $kpTag=base64_decode($kpFinal['kpTag']);
+        $encryptedKeyProtector_PDK=base64_decode($kpFinal['payload']);
 
         // Derive Password-Derived Key (PDK)
-        $pdk = derive_key($password, $salt);
+        $pdk=derive_key($password, $salt);
 
         // Decrypt the internal Key Protector JSON
-        $keyProtectorJSON = openssl_decrypt($encryptedKeyProtector_PDK, 'aes-256-gcm', $pdk, OPENSSL_RAW_DATA, $kpIv, $kpTag);
+        $keyProtectorJSON=openssl_decrypt($encryptedKeyProtector_PDK, 'aes-256-gcm', $pdk, OPENSSL_RAW_DATA, $kpIv, $kpTag);
         if ($keyProtectorJSON === false) {
             // This is the CRITICAL failure point for an incorrect password
             throw new Exception("Key Protector decryption failed. (Incorrect Password or Corrupt Key Protector File)");
         }
         
-        $kp = json_decode($keyProtectorJSON, true);
+        $kp=json_decode($keyProtectorJSON, true);
         // Check for required fields and the algorithm field
         if (!$kp || !isset($kp['encryptedSKey_PK'], $kp['fileIV'], $kp['fileTag'], $kp['originalFilename'], $kp['alg'])) {
             throw new Exception("Invalid decrypted Key Protector data (missing required fields or algorithm).");
         }
-        $originalFilename = $kp['originalFilename'];
-        $encryptedKeyAlg = $kp['alg'];
+        $originalFilename=$kp['originalFilename'];
+        $encryptedKeyAlg=$kp['alg'];
 
         // --- Determine Key Path Based on Stored Algorithm ---
         // This allows decryption of files encrypted with either RSA or PQC (Kyber) keys
         if (strpos($encryptedKeyAlg, 'PQC') !== false) {
-            $privateKeyPath = PQC_PRIVATE_KEY_PATH;
+            $privateKeyPath=PQC_PRIVATE_KEY_PATH;
         } else {
-            $privateKeyPath = RSA_PRIVATE_KEY_PATH;
+            $privateKeyPath=RSA_PRIVATE_KEY_PATH;
         }
 
 
         // --- Layer 2 Decryption: SKEY Unwrapper (Server's Private Key) ---
-        $encryptedSKey_PK = base64_decode($kp['encryptedSKey_PK']);
-        $privateKey = file_get_contents($privateKeyPath); // *** DYNAMIC KEY PATH ***
+        $encryptedSKey_PK=base64_decode($kp['encryptedSKey_PK']);
+        $privateKey=file_get_contents($privateKeyPath); // *** DYNAMIC KEY PATH ***
         if ($privateKey === false) { throw new Exception("Could not read private key (Server error)."); }
 
-        $skey = '';
+        $skey='';
         
         // Decrypt the symmetric key using the appropriate private key and OpenSSL's RSA-like function
         if (!openssl_private_decrypt($encryptedSKey_PK, $skey, $privateKey, OPENSSL_PKCS1_OAEP_PADDING)) {
@@ -264,28 +265,28 @@ function decrypt_file(string $filePath, string $keyFilePath, string $password): 
 
 
         // --- Layer 1 Decryption: File Decryption (Symmetric) ---
-        $encryptedData = file_get_contents($filePath);
+        $encryptedData=file_get_contents($filePath);
         if ($encryptedData === false) { throw new Exception("Could not read encrypted file contents."); }
 
-        $fileIV = base64_decode($kp['fileIV']);
-        $fileTag = base64_decode($kp['fileTag']);
+        $fileIV=base64_decode($kp['fileIV']);
+        $fileTag=base64_decode($kp['fileTag']);
 
-        $decryptedData = openssl_decrypt($encryptedData, 'aes-256-gcm', $skey, OPENSSL_RAW_DATA, $fileIV, $fileTag);
+        $decryptedData=openssl_decrypt($encryptedData, 'aes-256-gcm', $skey, OPENSSL_RAW_DATA, $fileIV, $fileTag);
         if ($decryptedData === false) {
             // This is the CRITICAL failure point if the file's integrity check fails
             throw new Exception("File decryption failed (Integrity Check Failed or Corrupt Data).");
         }
 
         // 6. Save Decrypted File
-        $safeOriginalFilename = basename($originalFilename);
-        $decryptedFilename = $safeOriginalFilename;
-        $decryptedPath = "$DATA_DIR/$decryptedFilename";
+        $safeOriginalFilename=basename($originalFilename);
+        $decryptedFilename=$safeOriginalFilename;
+        $decryptedPath="$DATA_DIR/$decryptedFilename";
 
         // Handle file name collisions (append timestamp if file already exists)
         if (file_exists($decryptedPath)) {
-            $pathParts = pathinfo($safeOriginalFilename);
-            $decryptedFilename = $pathParts['filename'] . '_' . time() . '.' . ($pathParts['extension'] ?? 'dat');
-            $decryptedPath = "$DATA_DIR/$decryptedFilename";
+            $pathParts=pathinfo($safeOriginalFilename);
+            $decryptedFilename=$pathParts['filename'] . '_' . time() . '.' . ($pathParts['extension'] ?? 'dat');
+            $decryptedPath="$DATA_DIR/$decryptedFilename";
         }
 
         if (!file_put_contents($decryptedPath, $decryptedData)) {
@@ -303,43 +304,43 @@ function decrypt_file(string $filePath, string $keyFilePath, string $password): 
 // --- Request Handling ---
 global $keyMode, $ACTIVE_ALG_NAME; // Import global variables
 
-$message = '';
-$downloadFile = null;
+$message='';
+$downloadFile=null;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $mode = $_POST['mode'] ?? '';
-    $password = $_POST['password'] ?? '';
-    $passwordConfirm = $_POST['password_confirm'] ?? '';
+    $mode=$_POST['mode'] ?? '';
+    $password=$_POST['password'] ?? '';
+    $passwordConfirm=$_POST['password_confirm'] ?? '';
 
     // General input validation
     if (empty($password)) {
-        $message = '<div class="alert error">Password cannot be empty.</div>';
+        $message='<div class="alert error">Password cannot be empty.</div>';
     } elseif (strlen($password) < 8) {
-         $message = '<div class="alert error">Password must be at least 8 characters long.</div>';
+         $message='<div class="alert error">Password must be at least 8 characters long.</div>';
     } elseif ($password !== $passwordConfirm) {
-        $message = '<div class="alert error">Passwords do not match.</div>';
+        $message='<div class="alert error">Passwords do not match.</div>';
     } else {
         if ($mode === 'encrypt' && isset($_FILES['uploaded_file']) && $_FILES['uploaded_file']['error'] === UPLOAD_ERR_OK) {
             if ($_FILES['uploaded_file']['size'] > $UPLOAD_MAX_SIZE) {
-                $message = '<div class="alert error">File size exceeds the 10MB limit.</div>';
+                $message='<div class="alert error">File size exceeds the 10MB limit.</div>';
             } else {
                 // *** Pass original filename to the encrypt function ***
-                $originalUploadName = $_FILES['uploaded_file']['name']; 
-                $result = encrypt_file($_FILES['uploaded_file']['tmp_name'], $password, $originalUploadName);
+                $originalUploadName=$_FILES['uploaded_file']['name']; 
+                $result=encrypt_file($_FILES['uploaded_file']['tmp_name'], $password, $originalUploadName);
                 if ($result) {
-                    $message = '<div class="alert success">Encryption Successful! Download your files below.</div>';
-                    $downloadFile = $result;
+                    $message='<div class="alert success">Encryption Successful! Download your files below.</div>';
+                    $downloadFile=$result;
                 } else {
-                    $message = '<div class="alert error">Encryption Failed. Check log file for details.</div>';
+                    $message='<div class="alert error">Encryption Failed. Check log file for details.</div>';
                 }
             }
         } elseif ($mode === 'decrypt' && isset($_FILES['encrypted_file'], $_FILES['key_protector']) && $_FILES['encrypted_file']['error'] === UPLOAD_ERR_OK && $_FILES['key_protector']['error'] === UPLOAD_ERR_OK) {
-            $result = decrypt_file($_FILES['encrypted_file']['tmp_name'], $_FILES['key_protector']['tmp_name'], $password);
+            $result=decrypt_file($_FILES['encrypted_file']['tmp_name'], $_FILES['key_protector']['tmp_name'], $password);
             if ($result) {
-                $message = '<div class="alert success">Decryption Successful! Download your file.</div>';
-                $downloadFile = $result;
+                $message='<div class="alert success">Decryption Successful! Download your file.</div>';
+                $downloadFile=$result;
             } else {
-                $message = '<div class="alert error">Decryption Failed. Check password, encrypted file, or key protector. Check log file for details.</div>';
+                $message='<div class="alert error">Decryption Failed. Check password, encrypted file, or key protector. Check log file for details.</div>';
             }
         }
     }
@@ -500,7 +501,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         // Set the active tab based on the form submission result or default to encrypt
         document.addEventListener('DOMContentLoaded', () => {
-            const currentMode = "<?php echo $_POST['mode'] ?? 'encrypt'; ?>";
+            const currentMode="<?php echo $_POST['mode'] ?? 'encrypt'; ?>";
             switchTab(currentMode);
         });
     </script>
@@ -514,17 +515,17 @@ generate_download_handler() {
     cat << 'DOWNLOAD_HANDLER_EOF' > "$DOWNLOAD_FILE"
 <?php
 // Configuration
-$DATA_DIR = __DIR__ . '/data';
+$DATA_DIR=__DIR__ . '/data';
 
 // Sanitize filename
-$filename = basename($_GET['file'] ?? '');
+$filename=basename($_GET['file'] ?? '');
 
 if (empty($filename)) {
     http_response_code(400);
     die("File name not provided.");
 }
 
-$filepath = realpath("$DATA_DIR/$filename");
+$filepath=realpath("$DATA_DIR/$filename");
 
 // Check if the file exists and is within the allowed data directory
 if (!$filepath || !file_exists($filepath) || strpos($filepath, $DATA_DIR) !== 0) {
